@@ -5,14 +5,18 @@ Reads dual-ankle accelerometer data (left + right leg), detects kick events,
 classifies them as selective (one leg) or non-selective (both legs within 200ms),
 logs each event to CSV, and plots live accelerometer traces.
 
-Hardware assumed: Two MPU6050 sensors on the same I2C bus at addresses 0x68 and 0x69.
-When no hardware is connected, the script auto-falls back to simulated data.
+Hardware: Two Seeed XIAO nRF52840 Sense boards, each with built-in LSM6DS3TRC IMU.
+Each XIAO streams "X: val  Y: val  Z: val m/s²" over USB serial at 100Hz.
+Values are in m/s² — converted to g internally (divide by 9.81).
+
+When no hardware is connected, auto-falls back to simulated data.
 
 Usage:
-    python kick_detector.py                     # auto-detect hardware or simulate
-    python kick_detector.py --sim               # force simulation
-    python kick_detector.py --port /dev/tty...  # read from Pico serial output
-    python kick_detector.py --threshold 1.2     # custom kick threshold in g
+    python kick_detector.py                          # simulate
+    python kick_detector.py --sim                    # force simulation
+    python kick_detector.py --left /dev/tty.usbmodem101 --right /dev/tty.usbmodem102
+    python kick_detector.py --left /dev/tty.usbmodem101 --sim-right  # one real, one sim
+    python kick_detector.py --threshold 1.2          # custom kick threshold in g
 """
 
 import argparse
@@ -129,33 +133,170 @@ class SynchronizedSimulation:
 
 
 # ---------------------------------------------------------------------------
-# Serial Data Source (reads from Pico running mpu6050_imu.py style output)
+# Serial Data Source (reads from XIAO nRF52840 Sense over USB serial)
 # ---------------------------------------------------------------------------
 
-class SerialSensor:
-    """
-    Reads two MPU6050 sensors streamed from a Pico over USB serial.
+MS2_TO_G = 1.0 / 9.81  # convert m/s² to g-forces
 
-    Expected line format (matches the repo's mpu6050_imu.py style):
-        (lx, ly, lz, rx, ry, rz)
+class XIAOSerialSensor:
+    """
+    Reads one XIAO nRF52840 Sense over USB serial.
+
+    Expected line format (from code.py on the XIAO):
+        X: 3.93  Y: 6.47  Z: 6.71 m/s²
+
+    Values are in m/s² and are converted to g internally.
     """
 
-    def __init__(self, port: str):
+    def __init__(self, port: str, label: str = ""):
         import serial  # type: ignore
         self._ser = serial.Serial(port, baudrate=115200, timeout=1.0)
-        print(f"Opened serial port: {self._ser.name}")
+        self._label = label
+        print(f"Opened {label} sensor on: {port}")
 
-    def read(self) -> tuple[tuple, tuple]:
-        line = self._ser.readline().decode("utf-8", errors="ignore").strip()
-        # parse (lx, ly, lz, rx, ry, rz)
-        inner = line.strip("()")
-        vals = [float(v) for v in inner.split(",")]
-        if len(vals) != 6:
-            raise ValueError(f"Unexpected serial format: {line!r}")
-        return (vals[0], vals[1], vals[2]), (vals[3], vals[4], vals[5])
+    def read(self) -> tuple[float, float, float]:
+        """Return (x, y, z) in g-forces."""
+        while True:
+            line = self._ser.readline().decode("utf-8", errors="ignore").strip()
+            if not line.startswith("X:"):
+                continue
+            try:
+                # parse "X: 3.93  Y: 6.47  Z: 6.71 m/s²"
+                parts = line.replace("m/s²", "").split()
+                x = float(parts[1]) * MS2_TO_G
+                y = float(parts[3]) * MS2_TO_G
+                z = float(parts[5]) * MS2_TO_G
+                return x, y, z
+            except (IndexError, ValueError):
+                continue
 
     def close(self):
         self._ser.close()
+
+
+class DualXIAOSource:
+    """Wraps two XIAOSerialSensor instances into a dual-leg source."""
+
+    def __init__(self, left_port: str, right_port: str):
+        self._left  = XIAOSerialSensor(left_port,  "LEFT")
+        self._right = XIAOSerialSensor(right_port, "RIGHT")
+
+    def read(self) -> tuple[tuple, tuple]:
+        return self._left.read(), self._right.read()
+
+    def close(self):
+        self._left.close()
+        self._right.close()
+
+
+class SingleXIAOSource:
+    """
+    Uses one real XIAO for one leg and simulation for the other.
+    Useful for testing with only one sensor connected.
+    """
+
+    def __init__(self, real_port: str, real_leg: str = "left"):
+        self._real   = XIAOSerialSensor(real_port, real_leg.upper())
+        self._sim    = SimulatedSensor(kick_rate=0.6, seed=99)
+        self._real_leg = real_leg
+
+    def read(self) -> tuple[tuple, tuple]:
+        real_xyz = self._real.read()
+        sim_xyz  = self._sim.read()
+        if self._real_leg == "left":
+            return real_xyz, sim_xyz
+        return sim_xyz, real_xyz
+
+
+# ---------------------------------------------------------------------------
+# BLE Data Source (wireless, uses bleak)
+# ---------------------------------------------------------------------------
+
+class BLESource:
+    """
+    Receives IMU data from one or two XIAO nRF52840 Sense boards over BLE.
+    Uses Nordic UART Service (NUS) to receive x,y,z in m/s².
+    If only XIAO-LEFT is found, simulates the right leg.
+    """
+
+    UART_RX_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+
+    def __init__(self):
+        import asyncio
+        from bleak import BleakScanner, BleakClient  # type: ignore
+        self._asyncio = asyncio
+        self._BleakScanner = BleakScanner
+        self._BleakClient  = BleakClient
+        self._left_xyz  = (0.0, 0.0, 1.0)
+        self._right_xyz = (0.0, 0.0, 1.0)
+        self._sim = SimulatedSensor(kick_rate=0.6, seed=99)
+        self._has_right = False
+        self._loop = asyncio.new_event_loop()
+        self._left_addr  = None
+        self._right_addr = None
+        self._left_client  = None
+        self._right_client = None
+        self._loop.run_until_complete(self._connect())
+
+    def _parse(self, data: bytearray):
+        try:
+            x, y, z = data.decode().strip().split(",")
+            return float(x) * MS2_TO_G, float(y) * MS2_TO_G, float(z) * MS2_TO_G
+        except Exception:
+            return None
+
+    def _left_handler(self, sender, data):
+        parsed = self._parse(data)
+        if parsed:
+            self._left_xyz = parsed
+
+    def _right_handler(self, sender, data):
+        parsed = self._parse(data)
+        if parsed:
+            self._right_xyz = parsed
+
+    async def _connect(self):
+        print("Scanning for XIAO sensors (10s)...")
+        devices = await self._BleakScanner.discover(timeout=10.0)
+        left_dev = right_dev = None
+        for d in devices:
+            if d.name == "XIAO-LEFT":
+                left_dev = d
+                print(f"Found XIAO-LEFT: {d.address}")
+            elif d.name == "XIAO-RIGHT":
+                right_dev = d
+                print(f"Found XIAO-RIGHT: {d.address}")
+
+        if not left_dev:
+            raise RuntimeError("XIAO-LEFT not found — make sure it's powered on and advertising")
+
+        self._left_client = self._BleakClient(left_dev.address)
+        await self._left_client.connect()
+        await self._left_client.start_notify(self.UART_RX_UUID, self._left_handler)
+        print("Connected to XIAO-LEFT ✅")
+
+        if right_dev:
+            self._right_client = self._BleakClient(right_dev.address)
+            await self._right_client.connect()
+            await self._right_client.start_notify(self.UART_RX_UUID, self._right_handler)
+            self._has_right = True
+            print("Connected to XIAO-RIGHT ✅")
+        else:
+            print("XIAO-RIGHT not found — simulating right leg")
+
+    def read(self) -> tuple[tuple, tuple]:
+        # pump BLE events
+        self._loop.run_until_complete(self._asyncio.sleep(0.01))
+        right = self._right_xyz if self._has_right else self._sim.read()
+        return self._left_xyz, right
+
+    def close(self):
+        async def _disconnect():
+            if self._left_client:
+                await self._left_client.disconnect()
+            if self._right_client:
+                await self._right_client.disconnect()
+        self._loop.run_until_complete(_disconnect())
 
 
 # ---------------------------------------------------------------------------
@@ -449,31 +590,41 @@ def run(source, threshold: float, no_plot: bool):
 
 def main():
     parser = argparse.ArgumentParser(description="Infant selective kick detector")
+    parser.add_argument("--left",      type=str, default=None,
+                        help="Serial port for LEFT ankle XIAO (e.g. /dev/tty.usbmodem101)")
+    parser.add_argument("--right",     type=str, default=None,
+                        help="Serial port for RIGHT ankle XIAO")
+    parser.add_argument("--sim-right", action="store_true",
+                        help="Simulate right leg (use with --left)")
+    parser.add_argument("--sim-left",  action="store_true",
+                        help="Simulate left leg (use with --right)")
+    parser.add_argument("--ble",       action="store_true",
+                        help="Use Bluetooth BLE (XIAO-LEFT and XIAO-RIGHT)")
     parser.add_argument("--sim",       action="store_true",
-                        help="Force simulated data (default when no hardware found)")
-    parser.add_argument("--port",      type=str, default=None,
-                        help="Serial port for Pico data (e.g. /dev/tty.usbmodem1101)")
+                        help="Force full simulation (no hardware)")
     parser.add_argument("--threshold", type=float, default=1.5,
                         help="Kick detection threshold in g (default: 1.5)")
     parser.add_argument("--no-plot",   action="store_true",
                         help="Disable live matplotlib plot")
     args = parser.parse_args()
 
-    if args.port:
-        print(f"Connecting to serial port: {args.port}")
-        source = SerialSensor(args.port)
-    elif not args.sim:
-        # Try to import direct I2C hardware driver; fall back to simulation
-        try:
-            import board, busio, adafruit_mpu6050  # type: ignore  # noqa: F401
-            raise NotImplementedError(
-                "Direct dual-I2C source not wired yet — use --port for Pico serial"
-            )
-        except (ImportError, NotImplementedError):
-            print("No hardware detected — using simulated infant kicking data.\n")
-            source = SynchronizedSimulation()
+    if args.ble:
+        print("Bluetooth BLE mode")
+        source = BLESource()
+    elif args.left and args.right:
+        print(f"Dual XIAO mode: left={args.left}  right={args.right}")
+        source = DualXIAOSource(args.left, args.right)
+    elif args.left and args.sim_right:
+        print(f"Single XIAO mode: left={args.left}, right=simulated")
+        source = SingleXIAOSource(args.left, real_leg="left")
+    elif args.right and args.sim_left:
+        print(f"Single XIAO mode: right={args.right}, left=simulated")
+        source = SingleXIAOSource(args.right, real_leg="right")
+    elif args.left:
+        print(f"Single XIAO mode: left={args.left}, right=simulated")
+        source = SingleXIAOSource(args.left, real_leg="left")
     else:
-        print("Simulation mode enabled.\n")
+        print("No hardware specified — using simulated infant kicking data.\n")
         source = SynchronizedSimulation()
 
     run(source, threshold=args.threshold, no_plot=args.no_plot)
