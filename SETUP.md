@@ -35,9 +35,17 @@ cd infant-kick-detector
 ```
 
 **3. Run the kick detector**
+
+Without live plot (terminal only):
 ```bash
 python src/kick_detector.py --ble --threshold 2.0 --no-plot
 ```
+
+With live plot (scrolling accelerometer graph with kick markers):
+```bash
+python src/kick_detector.py --ble --threshold 2.0
+```
+The plot shows both legs in real time — green lines are selective kicks, red lines are non-selective.
 
 **4. Wait ~20 seconds** — you should see:
 ```
