@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>MooMotion — Kick Monitor</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f5f5f5;
+      color: #222;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 32px 16px;
+    }
+    h1 { font-size: 1.8rem; margin-bottom: 4px; }
+    .subtitle { color: #666; margin-bottom: 32px; font-size: 0.95rem; }
+    .sensors {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 32px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .sensor-card {
+      background: white;
+      border-radius: 16px;
+      padding: 24px 32px;
+      text-align: center;
+      width: 200px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      border: 2px solid #eee;
+      transition: border-color 0.3s;
+    }
+    .sensor-card.connected { border-color: #4caf50; }
+    .sensor-card.error { border-color: #f44336; }
+    .sensor-label { font-weight: 600; font-size: 1rem; margin-bottom: 8px; }
+    .sensor-status {
+      font-size: 0.85rem;
+      color: #999;
+      margin-bottom: 12px;
+      min-height: 20px;
+    }
+    .sensor-card.connected .sensor-status { color: #4caf50; }
+    .sensor-card.error .sensor-status { color: #f44336; }
+    .sensor-mag {
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: #333;
+      min-height: 36px;
+    }
+    .connect-btn {
+      margin-top: 12px;
+      padding: 8px 16px;
+      border: none;
+      border-radius: 8px;
+      background: #1976d2;
+      color: white;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .connect-btn:hover { background: #1565c0; }
+    .connect-btn:disabled { background: #ccc; cursor: default; }
+
+    .kicks-panel {
+      background: white;
+      border-radius: 16px;
+      padding: 24px;
+      width: 100%;
+      max-width: 560px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      margin-bottom: 24px;
+    }
+    .kicks-panel h2 { font-size: 1rem; margin-bottom: 16px; color: #444; }
+    .stats {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+    .stat {
+      flex: 1;
+      min-width: 80px;
+      text-align: center;
+      background: #f9f9f9;
+      border-radius: 10px;
+      padding: 10px;
+    }
+    .stat-num { font-size: 1.6rem; font-weight: 700; }
+    .stat-label { font-size: 0.75rem; color: #888; margin-top: 2px; }
+    .stat-num.selective { color: #4caf50; }
+    .stat-num.nonselective { color: #f44336; }
+
+    .log {
+      max-height: 200px;
+      overflow-y: auto;
+      font-size: 0.82rem;
+      font-family: monospace;
+      background: #f9f9f9;
+      border-radius: 8px;
+      padding: 10px;
+    }
+    .log-row { padding: 2px 0; border-bottom: 1px solid #eee; }
+    .log-row.sel { color: #2e7d32; }
+    .log-row.nonsel { color: #c62828; }
+
+    .controls {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .controls button {
+      padding: 10px 24px;
+      border: none;
+      border-radius: 10px;
+      font-size: 0.95rem;
+      cursor: pointer;
+      font-weight: 600;
+      transition: background 0.2s;
+    }
+    #startBtn { background: #4caf50; color: white; }
+    #startBtn:hover { background: #388e3c; }
+    #startBtn:disabled { background: #ccc; cursor: default; }
+    #stopBtn { background: #f44336; color: white; }
+    #stopBtn:hover { background: #c62828; }
+    #stopBtn:disabled { background: #ccc; cursor: default; }
+    #downloadBtn { background: #1976d2; color: white; }
+    #downloadBtn:hover { background: #1565c0; }
+    #downloadBtn:disabled { background: #ccc; cursor: default; }
+
+    .threshold-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 24px;
+      font-size: 0.9rem;
+    }
+    input[type=range] { width: 140px; }
+
+    .notice {
+      font-size: 0.8rem;
+      color: #888;
+      max-width: 500px;
+      text-align: center;
+      margin-top: 8px;
+    }
+    canvas {
+      width: 100%;
+      max-width: 560px;
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      margin-bottom: 24px;
+    }
+  </style>
+</head>
+<body>
+
+<h1>🐄 MooMotion</h1>
+<p class="subtitle">Infant Selective Kick Monitor</p>
+
+<div class="sensors">
+  <div class="sensor-card" id="cardLeft">
+    <div class="sensor-label">LEFT Ankle</div>
+    <div class="sensor-status" id="statusLeft">Not connected</div>
+    <div class="sensor-mag" id="magLeft">—</div>
+    <button class="connect-btn" id="btnLeft" onclick="connectSensor('left')">Connect</button>
+  </div>
+  <div class="sensor-card" id="cardRight">
+    <div class="sensor-label">RIGHT Ankle</div>
+    <div class="sensor-status" id="statusRight">Not connected</div>
+    <div class="sensor-mag" id="magRight">—</div>
+    <button class="connect-btn" id="btnRight" onclick="connectSensor('right')">Connect</button>
+  </div>
+</div>
+
+<div class="threshold-row">
+  <label for="threshSlider">Kick threshold:</label>
+  <input type="range" id="threshSlider" min="0.5" max="4.0" step="0.1" value="2.0"
+    oninput="document.getElementById('threshVal').textContent = parseFloat(this.value).toFixed(1)">
+  <span id="threshVal">2.0</span> g
+</div>
+
+<div class="controls">
+  <button id="startBtn" onclick="startSession()" disabled>▶ Start Session</button>
+  <button id="stopBtn"  onclick="stopSession()"  disabled>■ Stop</button>
+  <button id="downloadBtn" onclick="downloadCSV()" disabled>⬇ Download CSV</button>
+</div>
+
+<canvas id="plotCanvas" height="160"></canvas>
+
+<div class="kicks-panel">
+  <h2>Session Stats</h2>
+  <div class="stats">
+    <div class="stat"><div class="stat-num" id="cntTotal">0</div><div class="stat-label">Total Kicks</div></div>
+    <div class="stat"><div class="stat-num selective" id="cntSel">0</div><div class="stat-label">Selective</div></div>
+    <div class="stat"><div class="stat-num nonselective" id="cntNon">0</div><div class="stat-label">Non-selective</div></div>
+    <div class="stat"><div class="stat-num" id="cntPct">—</div><div class="stat-label">Selectivity %</div></div>
+  </div>
+  <div class="log" id="kickLog"></div>
+</div>
+
+<p class="notice">⚠️ Requires Google Chrome. Bluetooth must be enabled on your Mac.<br>
+Use the Connect buttons above to pair each XIAO sensor wirelessly.</p>
+
+<script>
+// ── BLE constants ──────────────────────────────────────────────────────────
+const UART_SERVICE = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const UART_TX      = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // notify
+const WINDOW_MS    = 200;
+const REFRACTORY_MS = 300;
+
+// ── State ──────────────────────────────────────────────────────────────────
+const sensors = {
+  left:  { device: null, char: null, xyz: [0,0,1], lastKick: 0, mag: 0 },
+  right: { device: null, char: null, xyz: [0,0,1], lastKick: 0, mag: 0 },
+};
+const kickTimes = { left: [], right: [] };
+let sessionActive = false;
+let csvRows = [["timestamp","leg","selective","magnitude_g"]];
+let counts = { total:0, sel:0, non:0 };
+
+// ── Plot ───────────────────────────────────────────────────────────────────
+const canvas = document.getElementById("plotCanvas");
+const ctx = canvas.getContext("2d");
+const PLOT_LEN = 300;
+const leftTrace  = new Array(PLOT_LEN).fill(0);
+const rightTrace = new Array(PLOT_LEN).fill(0);
+let plotIdx = 0;
+
+function drawPlot() {
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0,0,W,H);
+  const thresh = parseFloat(document.getElementById("threshSlider").value);
+  const maxG = 4.0;
+  // background
+  ctx.fillStyle = "#fff"; ctx.fillRect(0,0,W,H);
+  // threshold line
+  ctx.strokeStyle = "#bbb"; ctx.setLineDash([4,4]); ctx.lineWidth = 1;
+  ctx.beginPath();
+  const ty = H/2 - (thresh/maxG)*(H/2 - 8);
+  ctx.moveTo(0,ty); ctx.lineTo(W,ty);
+  ctx.moveTo(0, H/2+ty-H/2+H/2); // mirror for bottom panel — skip for simplicity
+  ctx.stroke(); ctx.setLineDash([]);
+  // left trace (top half)
+  drawTrace(leftTrace,  "#2196F3", 0,    H/2 - 4, maxG);
+  // right trace (bottom half)
+  drawTrace(rightTrace, "#FF5722", H/2+4, H,      maxG);
+  // labels
+  ctx.fillStyle="#2196F3"; ctx.font="11px sans-serif"; ctx.fillText("Left",6,14);
+  ctx.fillStyle="#FF5722"; ctx.fillText("Right",6, H/2+16);
+  requestAnimationFrame(drawPlot);
+}
+
+function drawTrace(data, color, yTop, yBot, maxG) {
+  const W = canvas.width;
+  const h = yBot - yTop;
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+  for (let i = 0; i < PLOT_LEN; i++) {
+    const idx = (plotIdx + i) % PLOT_LEN;
+    const x = (i / PLOT_LEN) * W;
+    const y = yBot - (data[idx] / maxG) * h;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+// Resize canvas to match CSS width
+function resizeCanvas() {
+  canvas.width  = canvas.clientWidth;
+  canvas.height = canvas.clientHeight || 160;
+}
+window.addEventListener("resize", resizeCanvas);
+resizeCanvas();
+requestAnimationFrame(drawPlot);
+
+// ── BLE connect ────────────────────────────────────────────────────────────
+async function connectSensor(side) {
+  if (!navigator.bluetooth) {
+    alert("Web Bluetooth not supported. Please use Google Chrome.");
+    return;
+  }
+  const name = side === "left" ? "XIAO-LEFT" : "XIAO-RIGHT";
+  setStatus(side, "Scanning…", "");
+  try {
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ name }],
+      optionalServices: [UART_SERVICE]
+    });
+    setStatus(side, "Connecting…", "");
+    const server  = await device.gatt.connect();
+    const service = await server.getPrimaryService(UART_SERVICE);
+    const char    = await service.getCharacteristic(UART_TX);
+    await char.startNotifications();
+    char.addEventListener("characteristicvaluechanged", e => onData(side, e));
+    sensors[side].device = device;
+    sensors[side].char   = char;
+    device.addEventListener("gattserverdisconnected", () => onDisconnect(side));
+    setStatus(side, "Connected ✅", "connected");
+    document.getElementById(`btn${cap(side)}`).disabled = true;
+    checkStartReady();
+  } catch(e) {
+    setStatus(side, "Failed: " + e.message, "error");
+  }
+}
+
+function onData(side, event) {
+  const raw = new TextDecoder().decode(event.target.value).trim();
+  const parts = raw.split(",");
+  if (parts.length < 3) return;
+  const x = parseFloat(parts[0]) / 9.81;
+  const y = parseFloat(parts[1]) / 9.81;
+  const z = parseFloat(parts[2]) / 9.81;
+  const mag = Math.sqrt(x*x + y*y + z*z);
+  sensors[side].xyz = [x,y,z];
+  sensors[side].mag = mag;
+
+  // update display
+  document.getElementById(`mag${cap(side)}`).textContent = mag.toFixed(2) + " g";
+
+  // push to plot
+  if (side === "left")  { leftTrace[plotIdx]  = mag; }
+  else                  { rightTrace[plotIdx] = mag; plotIdx = (plotIdx+1) % PLOT_LEN; }
+
+  if (!sessionActive) return;
+
+  // kick detection
+  const thresh = parseFloat(document.getElementById("threshSlider").value);
+  const now = Date.now();
+  if (mag > thresh && (now - sensors[side].lastKick) > REFRACTORY_MS) {
+    sensors[side].lastKick = now;
+    recordKick(side, now, mag);
+  }
+}
+
+function recordKick(side, now, mag) {
+  // prune old times
+  const cutoff = now - WINDOW_MS;
+  kickTimes.left  = kickTimes.left.filter(t => t > cutoff);
+  kickTimes.right = kickTimes.right.filter(t => t > cutoff);
+  const other = side === "left" ? kickTimes.right : kickTimes.left;
+  const selective = other.length === 0;
+  kickTimes[side].push(now);
+
+  counts.total++;
+  selective ? counts.sel++ : counts.non++;
+  document.getElementById("cntTotal").textContent = counts.total;
+  document.getElementById("cntSel").textContent   = counts.sel;
+  document.getElementById("cntNon").textContent   = counts.non;
+  document.getElementById("cntPct").textContent   = Math.round(100*counts.sel/counts.total) + "%";
+
+  const ts = new Date().toISOString();
+  csvRows.push([ts, side, selective, mag.toFixed(4)]);
+
+  const label = selective ? "SELECTIVE ✓" : "non-selective";
+  const cls   = selective ? "sel" : "nonsel";
+  const log = document.getElementById("kickLog");
+  const row = document.createElement("div");
+  row.className = `log-row ${cls}`;
+  row.textContent = `${new Date().toLocaleTimeString()}  ${side.padEnd(6)}  ${label}  ${mag.toFixed(2)}g`;
+  log.prepend(row);
+}
+
+function onDisconnect(side) {
+  setStatus(side, "Disconnected", "error");
+  document.getElementById(`btn${cap(side)}`).disabled = false;
+  sensors[side].device = null;
+}
+
+// ── Session controls ───────────────────────────────────────────────────────
+function startSession() {
+  sessionActive = true;
+  counts = {total:0, sel:0, non:0};
+  csvRows = [["timestamp","leg","selective","magnitude_g"]];
+  kickTimes.left = []; kickTimes.right = [];
+  document.getElementById("kickLog").innerHTML = "";
+  ["cntTotal","cntSel","cntNon"].forEach(id => document.getElementById(id).textContent = "0");
+  document.getElementById("cntPct").textContent = "—";
+  document.getElementById("startBtn").disabled = true;
+  document.getElementById("stopBtn").disabled  = false;
+}
+
+function stopSession() {
+  sessionActive = false;
+  document.getElementById("startBtn").disabled = false;
+  document.getElementById("stopBtn").disabled  = true;
+  document.getElementById("downloadBtn").disabled = false;
+}
+
+function downloadCSV() {
+  const content = csvRows.map(r => r.join(",")).join("\n");
+  const blob = new Blob([content], {type:"text/csv"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `moomotion_session_${new Date().toISOString().slice(0,19).replace(/:/g,"-")}.csv`;
+  a.click();
+}
+
+function checkStartReady() {
+  const bothConnected = sensors.left.device && sensors.right.device;
+  const eitherConnected = sensors.left.device || sensors.right.device;
+  document.getElementById("startBtn").disabled = !eitherConnected;
+}
+
+function setStatus(side, msg, cls) {
+  const el = document.getElementById(`status${cap(side)}`);
+  el.textContent = msg;
+  const card = document.getElementById(`card${cap(side)}`);
+  card.className = "sensor-card" + (cls ? " " + cls : "");
+}
+
+function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+</script>
+</body>
+</html>
